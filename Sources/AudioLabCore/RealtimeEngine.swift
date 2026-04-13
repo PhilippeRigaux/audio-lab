@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import AppKit
 import AudioUnit
 import AudioToolbox
@@ -17,7 +17,7 @@ public struct AudioMeters {
     public let outputIntegratedLUFS: Double
 }
 
-public final class RealtimeEngine {
+public final class RealtimeEngine: @unchecked Sendable {
     public typealias PluginState = [String: Any]
     private struct HostedPlugin {
         var avAudioUnit: AVAudioUnit
@@ -29,6 +29,27 @@ public final class RealtimeEngine {
     private let inputDeviceName: String?
     private let outputDeviceName: String?
     private let pluginComponentDescriptions: [AudioComponentDescription]
+
+    private final class PluginInstantiationResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var unit: AVAudioUnit?
+        private var error: Error?
+        private var completed = false
+
+        func store(unit: AVAudioUnit?, error: Error?) {
+            lock.lock()
+            self.unit = unit
+            self.error = error
+            completed = true
+            lock.unlock()
+        }
+
+        func snapshot() -> (unit: AVAudioUnit?, error: Error?, completed: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (unit, error, completed)
+        }
+    }
 
     private var inputUnit: AudioUnit?
     private var outputUnit: AudioUnit?
@@ -247,7 +268,7 @@ public final class RealtimeEngine {
     }
 
     @MainActor
-    public func requestPluginEditorViewController(index: Int, completion: @escaping (NSViewController?) -> Void) {
+    public func requestPluginEditorViewController(index: Int, completion: @escaping @MainActor (NSViewController?) -> Void) {
         guard let auAudioUnit = hostedPluginAUAudioUnit(index: index) else {
             completion(nil)
             return
@@ -257,13 +278,10 @@ public final class RealtimeEngine {
             return
         }
 
-        auAudioUnit.requestViewController { [weak self] viewController in
-            Task { @MainActor in
-                guard let self else {
-                    completion(viewController)
-                    return
-                }
-                completion(viewController ?? self.makeLegacyPluginEditorViewController(audioUnit: avAudioUnit.audioUnit))
+        let fallbackViewController = makeLegacyPluginEditorViewController(audioUnit: avAudioUnit.audioUnit)
+        auAudioUnit.requestViewController { viewController in
+            DispatchQueue.main.async {
+                completion(viewController ?? fallbackViewController)
             }
         }
     }
@@ -469,22 +487,18 @@ public final class RealtimeEngine {
 
     private func instantiatePluginSynchronously(description: AudioComponentDescription) throws -> AVAudioUnit {
         let semaphore = DispatchSemaphore(value: 0)
-        var capturedUnit: AVAudioUnit?
-        var capturedError: Error?
-        var didComplete = false
+        let result = PluginInstantiationResult()
 
-        let instantiateBlock = {
+        let instantiateBlock: @Sendable () -> Void = {
             AVAudioUnit.instantiate(with: description, options: []) { unit, error in
-                capturedUnit = unit
-                capturedError = error
-                didComplete = true
+                result.store(unit: unit, error: error)
                 semaphore.signal()
             }
         }
 
         if Thread.isMainThread {
             instantiateBlock()
-            while !didComplete {
+            while !result.snapshot().completed {
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
             }
         } else {
@@ -492,10 +506,11 @@ public final class RealtimeEngine {
             semaphore.wait()
         }
 
-        if let capturedError {
+        let snapshot = result.snapshot()
+        if let capturedError = snapshot.error {
             throw AppError.message("Plugin instantiation failed: \(capturedError.localizedDescription)")
         }
-        guard let capturedUnit else {
+        guard let capturedUnit = snapshot.unit else {
             throw AppError.message("Plugin instantiation returned no unit")
         }
         return capturedUnit
@@ -725,7 +740,7 @@ public final class RealtimeEngine {
                                                  UInt32(frameCount),
                                                  bufferListPtr)
                     } else {
-                        var audioBuffer = AudioBuffer(
+                        let audioBuffer = AudioBuffer(
                             mNumberChannels: channels,
                             mDataByteSize: UInt32(frameCount) * channels * UInt32(MemoryLayout<Float>.size),
                             mData: outputBase

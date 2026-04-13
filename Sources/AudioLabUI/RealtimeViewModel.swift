@@ -18,6 +18,10 @@ struct PluginChainItem: Identifiable, Equatable {
 
 @MainActor
 final class RealtimeViewModel: NSObject, ObservableObject, NSWindowDelegate {
+    private struct SendablePluginStateSnapshot: @unchecked Sendable {
+        let value: RealtimeEngine.PluginState?
+    }
+
     private enum DefaultsKey {
         static let lastInputDeviceID = "last_input_device_id"
         static let lastOutputDeviceID = "last_output_device_id"
@@ -158,7 +162,7 @@ final class RealtimeViewModel: NSObject, ObservableObject, NSWindowDelegate {
         let outputQuery = selectedOutputDeviceID.map(String.init)
         let pluginDescriptions = pluginChain.map { $0.descriptor.componentDescription }
         let pluginBypasses = pluginChain.map(\.isBypassed)
-        let pluginStates = pluginChain.map { pluginStateByID[$0.id] }
+        let pluginStates = pluginChain.map { SendablePluginStateSnapshot(value: pluginStateByID[$0.id]) }
 
         engineQueue.async { [weak self] in
             let realtimeEngine = RealtimeEngine(inputDeviceName: inputQuery,
@@ -166,7 +170,7 @@ final class RealtimeViewModel: NSObject, ObservableObject, NSWindowDelegate {
                                                 pluginComponentDescriptions: pluginDescriptions)
             do {
                 try realtimeEngine.start()
-                realtimeEngine.applyPluginStates(pluginStates)
+                realtimeEngine.applyPluginStates(pluginStates.map(\.value))
                 for (index, bypassed) in pluginBypasses.enumerated() {
                     realtimeEngine.setPluginBypassed(index: index, bypassed: bypassed)
                 }
@@ -385,7 +389,7 @@ final class RealtimeViewModel: NSObject, ObservableObject, NSWindowDelegate {
         let outputQuery = selectedOutputDeviceID.map(String.init)
         let pluginDescriptions = pluginChain.map { $0.descriptor.componentDescription }
         let pluginBypasses = pluginChain.map(\.isBypassed)
-        let pluginStates = pluginChain.map { pluginStateByID[$0.id] }
+        let pluginStates = pluginChain.map { SendablePluginStateSnapshot(value: pluginStateByID[$0.id]) }
 
         engineQueue.async { [weak self] in
             oldEngine?.stop()
@@ -394,7 +398,7 @@ final class RealtimeViewModel: NSObject, ObservableObject, NSWindowDelegate {
                                                 pluginComponentDescriptions: pluginDescriptions)
             do {
                 try realtimeEngine.start()
-                realtimeEngine.applyPluginStates(pluginStates)
+                realtimeEngine.applyPluginStates(pluginStates.map(\.value))
                 for (index, bypassed) in pluginBypasses.enumerated() {
                     realtimeEngine.setPluginBypassed(index: index, bypassed: bypassed)
                 }
